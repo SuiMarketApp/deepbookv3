@@ -44,6 +44,7 @@ const EPoolNotRegistered: u64 = 14;
 const EPoolCannotBeBothWhitelistedAndStable: u64 = 15;
 const EMarketInactive: u64 = 17;
 const EInvalidFeeCollector: u64 = 18;
+const EUnauthorizedRouter: u64 = 19;
 
 // === Structs ===
 public struct Pool<phantom BaseAsset, phantom QuoteAsset> has key {
@@ -59,6 +60,7 @@ public struct PoolInner<phantom BaseAsset, phantom QuoteAsset> has store {
     vault: Vault<BaseAsset, QuoteAsset>,
     deep_price: DeepPrice,
     registered_pool: bool,
+    authorized_routers: VecSet<ID>,
 }
 
 public struct PoolCreated<phantom BaseAsset, phantom QuoteAsset> has copy, drop, store {
@@ -83,6 +85,14 @@ public struct BookParamsUpdated<phantom BaseAsset, phantom QuoteAsset> has copy,
 public struct DeepBurned<phantom BaseAsset, phantom QuoteAsset> has copy, drop, store {
     pool_id: ID,
     deep_burned: u64,
+}
+
+/// Event emitted when a router's authorization status changes
+public struct RouterAuthorizationChanged<phantom BaseAsset, phantom QuoteAsset> has copy, drop, store {
+    pool_id: ID,
+    router_id: ID,
+    is_authorized: bool,
+    timestamp: u64,
 }
 
 // === Public-Mutative Functions * POOL CREATION * ===
@@ -768,6 +778,54 @@ public fun adjust_min_lot_size_admin<BaseAsset, QuoteAsset>(
     });
 }
 
+/// Add a router to the authorized routers list
+public fun add_authorized_router<BaseAsset, QuoteAsset>(
+    self: &mut Pool<BaseAsset, QuoteAsset>,
+    router_id: ID,
+    _cap: &DeepbookAdminCap,
+    clock: &Clock,
+    ctx: &TxContext,
+) {
+    let self = self.load_inner_mut();
+    self.authorized_routers.insert(router_id);
+    
+    event::emit(RouterAuthorizationChanged<BaseAsset, QuoteAsset> {
+        pool_id: self.pool_id,
+        router_id,
+        is_authorized: true,
+        timestamp: clock.timestamp_ms(),
+    });
+}
+
+/// Remove a router from the authorized routers list
+public fun remove_authorized_router<BaseAsset, QuoteAsset>(
+    self: &mut Pool<BaseAsset, QuoteAsset>,
+    router_id: ID,
+    _cap: &DeepbookAdminCap,
+    clock: &Clock,
+    ctx: &TxContext,
+) {
+    let self = self.load_inner_mut();
+    if (self.authorized_routers.contains(&router_id)) {
+        self.authorized_routers.remove(&router_id);
+        
+        event::emit(RouterAuthorizationChanged<BaseAsset, QuoteAsset> {
+            pool_id: self.pool_id,
+            router_id,
+            is_authorized: false,
+            timestamp: clock.timestamp_ms(),
+        });
+    }
+}
+
+/// Check if a router is authorized
+public fun is_router_authorized<BaseAsset, QuoteAsset>(
+    self: &Pool<BaseAsset, QuoteAsset>,
+    router_id: ID,
+): bool {
+    self.load_inner().authorized_routers.contains(&router_id)
+}
+
 // === Public-View Functions ===
 /// Accessor to check if the pool is whitelisted.
 public fun whitelisted<BaseAsset, QuoteAsset>(self: &Pool<BaseAsset, QuoteAsset>): bool {
@@ -1153,6 +1211,7 @@ public(package) fun create_pool<BaseAsset, QuoteAsset>(
         vault: vault::empty(),
         deep_price: deep_price::empty(),
         registered_pool: true,
+        authorized_routers: vec_set::empty(),
     };
     if (whitelisted_pool) {
         pool_inner.set_whitelist(ctx);
@@ -1354,5 +1413,102 @@ public(package) fun assert_market_active<BaseAsset, QuoteAsset>(self: &Pool<Base
         self.load_inner().state.governance().trade_params().is_active(),
         EMarketInactive
     );
+}
+
+/// Place a shadow limit order from the router contract alongside a user's order.
+/// This function can only be called by authorized router contracts.
+/// The router must have a balance manager with sufficient funds.
+public fun place_shadow_limit_order<BaseAsset, QuoteAsset>(
+    self: &mut Pool<BaseAsset, QuoteAsset>,
+    router_balance_manager: &mut BalanceManager,
+    trade_proof: &TradeProof,
+    client_order_id: u64,
+    order_type: u8,
+    self_matching_option: u8,
+    price: u64,
+    quantity: u64,
+    is_bid: bool,
+    pay_with_deep: bool,
+    expire_timestamp: u64,
+    authorized_router_id: ID,
+    clock: &Clock,
+    ctx: &TxContext,
+): OrderInfo {
+    // Verify the router is authorized
+    assert!(router_balance_manager.id() == authorized_router_id, EUnauthorizedRouter);
+    assert!(self.is_router_authorized(authorized_router_id), EUnauthorizedRouter);
+    
+    // Place the shadow order using the same internal function as regular limit orders
+    self.place_order_int(
+        router_balance_manager,
+        trade_proof,
+        client_order_id,
+        order_type,
+        self_matching_option,
+        price,
+        quantity,
+        is_bid,
+        pay_with_deep,
+        expire_timestamp,
+        clock,
+        false,
+        ctx,
+    )
+}
+
+/// Place a user limit order with a shadow order from the router.
+/// This allows placing both orders in a single transaction.
+public fun place_limit_order_with_shadow<BaseAsset, QuoteAsset>(
+    self: &mut Pool<BaseAsset, QuoteAsset>,
+    user_balance_manager: &mut BalanceManager,
+    user_trade_proof: &TradeProof,
+    router_balance_manager: &mut BalanceManager,
+    router_trade_proof: &TradeProof,
+    client_order_id: u64,
+    order_type: u8,
+    self_matching_option: u8,
+    price: u64,
+    quantity: u64,
+    is_bid: bool,
+    pay_with_deep: bool,
+    expire_timestamp: u64,
+    authorized_router_id: ID,
+    clock: &Clock,
+    ctx: &TxContext,
+): (OrderInfo, OrderInfo) {
+    // Place the user's order first
+    let user_order = self.place_limit_order(
+        user_balance_manager,
+        user_trade_proof,
+        client_order_id,
+        order_type,
+        self_matching_option,
+        price,
+        quantity,
+        is_bid,
+        pay_with_deep,
+        expire_timestamp,
+        clock,
+        ctx,
+    );
+
+    // Place the shadow order
+    let shadow_order = self.place_shadow_limit_order(
+        router_balance_manager,
+        router_trade_proof,
+        client_order_id + 1, // Increment order ID for shadow order
+        order_type,
+        self_matching_option,
+        price,
+        quantity,
+        is_bid,
+        pay_with_deep,
+        expire_timestamp,
+        authorized_router_id,
+        clock,
+        ctx,
+    );
+
+    (user_order, shadow_order)
 }
 
