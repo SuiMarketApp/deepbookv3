@@ -140,7 +140,6 @@ public fun place_limit_order<BaseAsset, QuoteAsset>(
     price: u64,
     quantity: u64,
     is_bid: bool,
-    pay_with_deep: bool,
     expire_timestamp: u64,
     clock: &Clock,
     ctx: &TxContext,
@@ -154,7 +153,6 @@ public fun place_limit_order<BaseAsset, QuoteAsset>(
         price,
         quantity,
         is_bid,
-        pay_with_deep,
         expire_timestamp,
         clock,
         false,
@@ -174,7 +172,6 @@ public fun place_market_order<BaseAsset, QuoteAsset>(
     self_matching_option: u8,
     quantity: u64,
     is_bid: bool,
-    pay_with_deep: bool,
     clock: &Clock,
     ctx: &TxContext,
 ): OrderInfo {
@@ -187,7 +184,6 @@ public fun place_market_order<BaseAsset, QuoteAsset>(
         if (is_bid) constants::max_price() else constants::min_price(),
         quantity,
         is_bid,
-        pay_with_deep,
         clock.timestamp_ms(),
         clock,
         true,
@@ -297,7 +293,6 @@ public fun swap_exact_quantity<BaseAsset, QuoteAsset>(
         constants::self_matching_allowed(),
         base_quantity,
         is_bid,
-        pay_with_deep,
         clock,
         ctx,
     );
@@ -1295,7 +1290,6 @@ fun place_order_int<BaseAsset, QuoteAsset>(
     price: u64,
     quantity: u64,
     is_bid: bool,
-    pay_with_deep: bool,
     expire_timestamp: u64,
     clock: &Clock,
     market_order: bool,
@@ -1304,11 +1298,7 @@ fun place_order_int<BaseAsset, QuoteAsset>(
     let whitelist = self.whitelisted();
     let self = self.load_inner_mut();
 
-    let order_deep_price = if (pay_with_deep) {
-        self.deep_price.get_order_deep_price(whitelist)
-    } else {
-        self.deep_price.empty_deep_price()
-    };
+    let order_deep_price = self.deep_price.empty_deep_price();
 
     let mut order_info = order_info::new(
         self.pool_id,
@@ -1320,7 +1310,7 @@ fun place_order_int<BaseAsset, QuoteAsset>(
         price,
         quantity,
         is_bid,
-        pay_with_deep,
+        false,
         ctx.epoch(),
         expire_timestamp,
         order_deep_price,
@@ -1428,7 +1418,6 @@ public fun place_shadow_limit_order<BaseAsset, QuoteAsset>(
     price: u64,
     quantity: u64,
     is_bid: bool,
-    pay_with_deep: bool,
     expire_timestamp: u64,
     authorized_router_id: ID,
     clock: &Clock,
@@ -1448,7 +1437,6 @@ public fun place_shadow_limit_order<BaseAsset, QuoteAsset>(
         price,
         quantity,
         is_bid,
-        pay_with_deep,
         expire_timestamp,
         clock,
         false,
@@ -1470,7 +1458,6 @@ public fun place_limit_order_with_shadow<BaseAsset, QuoteAsset>(
     price: u64,
     quantity: u64,
     is_bid: bool,
-    pay_with_deep: bool,
     expire_timestamp: u64,
     authorized_router_id: ID,
     clock: &Clock,
@@ -1486,7 +1473,6 @@ public fun place_limit_order_with_shadow<BaseAsset, QuoteAsset>(
         price,
         quantity,
         is_bid,
-        pay_with_deep,
         expire_timestamp,
         clock,
         ctx,
@@ -1502,7 +1488,6 @@ public fun place_limit_order_with_shadow<BaseAsset, QuoteAsset>(
         price,
         quantity,
         is_bid,
-        pay_with_deep,
         expire_timestamp,
         authorized_router_id,
         clock,
