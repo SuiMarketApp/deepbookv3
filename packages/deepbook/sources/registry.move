@@ -63,6 +63,19 @@ fun init(_: REGISTRY, ctx: &mut TxContext) {
     transfer::public_transfer(admin, ctx.sender());
 }
 
+public entry fun create_registry_for_init(ctx: &mut TxContext) {
+    let registry_inner = RegistryInner {
+        allowed_versions: vec_set::singleton(constants::current_version()),
+        pools: bag::new(ctx),
+        treasury_address: ctx.sender(),
+    };
+    let registry = Registry {
+        id: object::new(ctx),
+        inner: versioned::create(constants::current_version(), registry_inner, ctx),
+    };
+    transfer::share_object(registry);
+}
+
 // === Public Admin Functions ===
 /// Sets the treasury address where the pool creation fees are sent
 /// By default, the treasury address is the publisher of the deepbook package
