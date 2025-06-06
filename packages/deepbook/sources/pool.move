@@ -27,6 +27,7 @@ use sui::{
     versioned::{Self, Versioned}
 };
 use token::deep::{DEEP, ProtectedTreasury};
+use sui::sui::SUI;
 
 // === Errors ===
 const ESameBaseAndQuote: u64 = 2;
@@ -106,7 +107,7 @@ public fun create_permissionless_pool<BaseAsset, QuoteAsset>(
     tick_size: u64,
     lot_size: u64,
     min_size: u64,
-    creation_fee: Coin<DEEP>,
+    creation_fee: Coin<SUI>,
     ctx: &mut TxContext,
 ): ID {
     let base_type = type_name::get<BaseAsset>();
@@ -1182,7 +1183,7 @@ public(package) fun create_pool<BaseAsset, QuoteAsset>(
     tick_size: u64,
     lot_size: u64,
     min_size: u64,
-    creation_fee: Coin<DEEP>,
+    creation_fee: Coin<SUI>,
     whitelisted_pool: bool,
     stable_pool: bool,
     ctx: &mut TxContext,
