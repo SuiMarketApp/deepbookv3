@@ -27,6 +27,7 @@ use sui::{
     versioned::{Self, Versioned}
 };
 use token::deep::{DEEP, ProtectedTreasury};
+use sui::sui::SUI;
 
 // === Errors ===
 const EInvalidFee: u64 = 1;
@@ -95,7 +96,7 @@ public fun create_permissionless_pool<BaseAsset, QuoteAsset>(
     tick_size: u64,
     lot_size: u64,
     min_size: u64,
-    creation_fee: Coin<DEEP>,
+    creation_fee: Coin<SUI>,
     ctx: &mut TxContext,
 ): ID {
     assert!(creation_fee.value() == constants::pool_creation_fee(), EInvalidFee);
@@ -1129,7 +1130,7 @@ public(package) fun create_pool<BaseAsset, QuoteAsset>(
     tick_size: u64,
     lot_size: u64,
     min_size: u64,
-    creation_fee: Coin<DEEP>,
+    creation_fee: Coin<SUI>,
     whitelisted_pool: bool,
     stable_pool: bool,
     ctx: &mut TxContext,
