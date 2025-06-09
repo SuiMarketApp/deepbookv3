@@ -96,10 +96,8 @@ public fun create_permissionless_pool<BaseAsset, QuoteAsset>(
     tick_size: u64,
     lot_size: u64,
     min_size: u64,
-    creation_fee: Coin<SUI>,
     ctx: &mut TxContext,
 ): ID {
-    assert!(creation_fee.value() == constants::pool_creation_fee(), EInvalidFee);
     let base_type = type_name::get<BaseAsset>();
     let quote_type = type_name::get<QuoteAsset>();
     let whitelisted_pool = false;
@@ -110,7 +108,6 @@ public fun create_permissionless_pool<BaseAsset, QuoteAsset>(
         tick_size,
         lot_size,
         min_size,
-        creation_fee,
         whitelisted_pool,
         stable_pool,
         ctx,
@@ -671,28 +668,28 @@ public fun burn_deep<BaseAsset, QuoteAsset>(
 /// Checks are performed to ensure the tick size, lot size, and min size are
 /// valid.
 /// Returns the id of the pool created
-public fun create_pool_admin<BaseAsset, QuoteAsset>(
-    registry: &mut Registry,
-    tick_size: u64,
-    lot_size: u64,
-    min_size: u64,
-    whitelisted_pool: bool,
-    stable_pool: bool,
-    _cap: &DeepbookAdminCap,
-    ctx: &mut TxContext,
-): ID {
-    let creation_fee = coin::zero(ctx);
-    create_pool<BaseAsset, QuoteAsset>(
-        registry,
-        tick_size,
-        lot_size,
-        min_size,
-        creation_fee,
-        whitelisted_pool,
-        stable_pool,
-        ctx,
-    )
-}
+// public fun create_pool_admin<BaseAsset, QuoteAsset>(
+//     registry: &mut Registry,
+//     tick_size: u64,
+//     lot_size: u64,
+//     min_size: u64,
+//     whitelisted_pool: bool,
+//     stable_pool: bool,
+//     _cap: &DeepbookAdminCap,
+//     ctx: &mut TxContext,
+// ): ID {
+//     let creation_fee = coin::zero(ctx);
+//     create_pool<BaseAsset, QuoteAsset>(
+//         registry,
+//         tick_size,
+//         lot_size,
+//         min_size,
+//         creation_fee,
+//         whitelisted_pool,
+//         stable_pool,
+//         ctx,
+//     )
+// }
 
 /// Unregister a pool in case it needs to be redeployed.
 public fun unregister_pool_admin<BaseAsset, QuoteAsset>(
@@ -1130,7 +1127,6 @@ public(package) fun create_pool<BaseAsset, QuoteAsset>(
     tick_size: u64,
     lot_size: u64,
     min_size: u64,
-    creation_fee: Coin<SUI>,
     whitelisted_pool: bool,
     stable_pool: bool,
     ctx: &mut TxContext,
@@ -1179,7 +1175,6 @@ public(package) fun create_pool<BaseAsset, QuoteAsset>(
         treasury_address,
     });
 
-    transfer::public_transfer(creation_fee, treasury_address);
     transfer::share_object(pool);
 
     pool_id
