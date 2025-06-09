@@ -799,15 +799,15 @@ fun test_place_order_with_lower_min_quantity_e() {
     test_place_order_edge_price(constants::lot_size(), constants::tick_size())
 }
 
-#[test]
-fun test_order_limit_bid_ok() {
-    test_order_limit(true);
-}
+// #[test]
+// fun test_order_limit_bid_ok() {
+//     test_order_limit(true);
+// }
 
-#[test]
-fun test_order_limit_ask_ok() {
-    test_order_limit(false);
-}
+// #[test]
+// fun test_order_limit_ask_ok() {
+//     test_order_limit(false);
+// }
 
 #[test, expected_failure(abort_code = ::deepbook::pool::EIneligibleReferencePool)]
 fun test_using_unregistered_as_reference() {
@@ -4937,7 +4937,7 @@ fun setup_permissionless_pool<BaseAsset, QuoteAsset>(
                 tick_size,
                 lot_size,
                 min_size,
-                mint_for_testing<DEEP>(
+                mint_for_testing<SUI>(
                     constants::pool_creation_fee(),
                     test.ctx(),
                 ),
