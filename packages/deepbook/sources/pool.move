@@ -6,7 +6,7 @@ module deepbook::pool;
 
 use deepbook::{
     account::Account,
-    balance_manager::{Self, BalanceManager, TradeProof},
+    balance_manager::{Self, BalanceManager, TradeProof, mint_trade_cap, generate_proof_as_trader},
     big_vector::BigVector,
     book::{Self, Book},
     constants,
@@ -23,11 +23,11 @@ use sui::{
     clock::Clock,
     coin::{Self, Coin},
     event,
+    sui::SUI,
     vec_set::{Self, VecSet},
     versioned::{Self, Versioned}
 };
 use token::deep::{DEEP, ProtectedTreasury};
-use sui::sui::SUI;
 
 // === Errors ===
 const EInvalidFee: u64 = 1;
@@ -90,7 +90,10 @@ public struct DeepBurned<phantom BaseAsset, phantom QuoteAsset> has copy, drop, 
 }
 
 /// Event emitted when a router's authorization status changes
-public struct RouterAuthorizationChanged<phantom BaseAsset, phantom QuoteAsset> has copy, drop, store {
+public struct RouterAuthorizationChanged<
+    phantom BaseAsset,
+    phantom QuoteAsset,
+> has copy, drop, store {
     pool_id: ID,
     router_id: ID,
     is_authorized: bool,
@@ -133,7 +136,6 @@ public fun create_permissionless_pool<BaseAsset, QuoteAsset>(
 public fun place_limit_order<BaseAsset, QuoteAsset>(
     self: &mut Pool<BaseAsset, QuoteAsset>,
     balance_manager: &mut BalanceManager,
-    trade_proof: &TradeProof,
     client_order_id: u64,
     order_type: u8,
     self_matching_option: u8,
@@ -143,11 +145,14 @@ public fun place_limit_order<BaseAsset, QuoteAsset>(
     pay_with_deep: bool,
     expire_timestamp: u64,
     clock: &Clock,
-    ctx: &TxContext,
-): OrderInfo {
-    self.place_order_int(
+    ctx: &mut TxContext,
+): (OrderInfo, balance_manager::TradeCap) {
+    let trade_cap = mint_trade_cap(balance_manager, ctx);
+    let trade_proof = balance_manager::generate_proof_as_trader(balance_manager, &trade_cap, ctx);
+
+    let order_info = self.place_order_int(
         balance_manager,
-        trade_proof,
+        &trade_proof,
         client_order_id,
         order_type,
         self_matching_option,
@@ -159,7 +164,8 @@ public fun place_limit_order<BaseAsset, QuoteAsset>(
         clock,
         false,
         ctx,
-    )
+    );
+    (order_info, trade_cap)
 }
 
 /// Place a market order. Quantity is in base asset terms. Calls
@@ -320,17 +326,19 @@ public fun swap_exact_quantity<BaseAsset, QuoteAsset>(
 /// Modifies an order given order_id and new_quantity.
 /// New quantity must be less than the original quantity and more
 /// than the filled quantity. Order must not have already expired.
+/// 
+
 public fun modify_order<BaseAsset, QuoteAsset>(
     self: &mut Pool<BaseAsset, QuoteAsset>,
     balance_manager: &mut BalanceManager,
-    trade_proof: &TradeProof,
     order_id: u128,
     new_quantity: u64,
     clock: &Clock,
-    ctx: &TxContext,
+    ctx: &mut TxContext,
 ) {
+    let trade_cap = mint_trade_cap(balance_manager, ctx);
+    let trade_proof = balance_manager::generate_proof_as_trader(balance_manager, &trade_cap, ctx);
     let previous_quantity = self.get_order(order_id).quantity();
-
     let self = self.load_inner_mut();
     let (cancel_quantity, order) = self
         .book
@@ -345,8 +353,14 @@ public fun modify_order<BaseAsset, QuoteAsset>(
             self.pool_id,
             ctx,
         );
-    self.vault.settle_balance_manager(settled, owed, balance_manager, trade_proof);
-
+    self.vault.settle_balance_manager(settled, owed, balance_manager, &trade_proof);
+    order.emit_order_modified(
+        self.pool_id,
+        previous_quantity,
+        ctx.sender(),
+        clock.timestamp_ms(),
+    );
+    transfer::public_transfer(trade_cap, tx_context::sender(ctx)); // Use public_transfer
     order.emit_order_modified(
         self.pool_id,
         previous_quantity,
@@ -354,6 +368,7 @@ public fun modify_order<BaseAsset, QuoteAsset>(
         clock.timestamp_ms(),
     );
 }
+
 
 /// Cancel an order. The order must be owned by the balance_manager.
 /// The order is removed from the book and the balance_manager's open orders.
@@ -1380,12 +1395,14 @@ public fun close_market<BaseAsset, QuoteAsset>(
         let balance_manager_id = order.balance_manager_id();
 
         // Process cancel for each order
-        self.state.process_cancel(
-            &mut order,
-            balance_manager_id,
-            self.pool_id,
-            ctx
-        );
+        self
+            .state
+            .process_cancel(
+                &mut order,
+                balance_manager_id,
+                self.pool_id,
+                ctx,
+            );
     };
 
     // Clear all ask orders
@@ -1396,21 +1413,22 @@ public fun close_market<BaseAsset, QuoteAsset>(
         let balance_manager_id = order.balance_manager_id();
 
         // Process cancel for each order
-        self.state.process_cancel(
-            &mut order,
-            balance_manager_id,
-            self.pool_id,
-            ctx
-        );
+        self
+            .state
+            .process_cancel(
+                &mut order,
+                balance_manager_id,
+                self.pool_id,
+                ctx,
+            );
     };
 }
 
 /// Checks if market is active before processing orders
-public(package) fun assert_market_active<BaseAsset, QuoteAsset>(self: &Pool<BaseAsset, QuoteAsset>) {
-    assert!(
-        self.load_inner().state.governance().trade_params().is_active(),
-        EMarketInactive
-    );
+public(package) fun assert_market_active<BaseAsset, QuoteAsset>(
+    self: &Pool<BaseAsset, QuoteAsset>,
+) {
+    assert!(self.load_inner().state.governance().trade_params().is_active(), EMarketInactive);
 }
 
 /// Place a shadow limit order from the router contract alongside a user's order.
@@ -1455,54 +1473,54 @@ public fun place_shadow_limit_order<BaseAsset, QuoteAsset>(
 
 /// Place a user limit order with a shadow order from the router.
 /// This allows placing both orders in a single transaction.
-public fun place_limit_order_with_shadow<BaseAsset, QuoteAsset>(
-    self: &mut Pool<BaseAsset, QuoteAsset>,
-    user_balance_manager: &mut BalanceManager,
-    user_trade_proof: &TradeProof,
-    router_balance_manager: &mut BalanceManager,
-    router_trade_proof: &TradeProof,
-    client_order_id: u64,
-    order_type: u8,
-    self_matching_option: u8,
-    price: u64,
-    quantity: u64,
-    is_bid: bool,
-    expire_timestamp: u64,
-    authorized_router_id: ID,
-    clock: &Clock,
-    ctx: &TxContext,
-): (OrderInfo, OrderInfo) {
-    // Place the user's order first
-    let user_order = self.place_limit_order(
-        user_balance_manager,
-        user_trade_proof,
-        client_order_id,
-        order_type,
-        self_matching_option,
-        price,
-        quantity,
-        is_bid,
-        false,
-        expire_timestamp,
-        clock,
-        ctx,
-    );
+// public fun place_limit_order_with_shadow<BaseAsset, QuoteAsset>(
+//     self: &mut Pool<BaseAsset, QuoteAsset>,
+//     user_balance_manager: &mut BalanceManager,
+//     user_trade_proof: &TradeProof,
+//     router_balance_manager: &mut BalanceManager,
+//     router_trade_proof: &TradeProof,
+//     client_order_id: u64,
+//     order_type: u8,
+//     self_matching_option: u8,
+//     price: u64,
+//     quantity: u64,
+//     is_bid: bool,
+//     expire_timestamp: u64,
+//     authorized_router_id: ID,
+//     clock: &Clock,
+//     ctx: &TxContext,
+// ): (OrderInfo, OrderInfo) {
+//     // Place the user's order first
+//     let user_order = self.place_limit_order(
+//         user_balance_manager,
+//         user_trade_proof,
+//         client_order_id,
+//         order_type,
+//         self_matching_option,
+//         price,
+//         quantity,
+//         is_bid,
+//         false,
+//         expire_timestamp,
+//         clock,
+//         ctx,
+//     );
 
-    // Place the shadow order
-    let shadow_order = self.place_shadow_limit_order(
-        router_balance_manager,
-        router_trade_proof,
-        client_order_id + 1, // Increment order ID for shadow order
-        order_type,
-        self_matching_option,
-        price,
-        quantity,
-        is_bid,
-        expire_timestamp,
-        authorized_router_id,
-        clock,
-        ctx,
-    );
+//     // Place the shadow order
+//     let shadow_order = self.place_shadow_limit_order(
+//         router_balance_manager,
+//         router_trade_proof,
+//         client_order_id + 1, // Increment order ID for shadow order
+//         order_type,
+//         self_matching_option,
+//         price,
+//         quantity,
+//         is_bid,
+//         expire_timestamp,
+//         authorized_router_id,
+//         clock,
+//         ctx,
+//     );
 
-    (user_order, shadow_order)
-}
+//     (user_order, shadow_order)
+// }
