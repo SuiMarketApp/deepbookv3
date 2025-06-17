@@ -47,6 +47,7 @@ const EPoolCannotBeBothWhitelistedAndStable: u64 = 15;
 const EMarketInactive: u64 = 17;
 const EInvalidFeeCollector: u64 = 18;
 const EUnauthorizedRouter: u64 = 19;
+const E_INVALID_ORDER_BALANCE_MANAGER: u64 = 20;
 
 // === Structs ===
 public struct Pool<phantom BaseAsset, phantom QuoteAsset> has key {
@@ -378,24 +379,25 @@ public fun modify_order<BaseAsset, QuoteAsset>(
 public fun cancel_order<BaseAsset, QuoteAsset>(
     self: &mut Pool<BaseAsset, QuoteAsset>,
     balance_manager: &mut BalanceManager,
-    trade_proof: &TradeProof,
     order_id: u128,
     clock: &Clock,
-    ctx: &TxContext,
+    ctx: &mut TxContext,
 ) {
+    let trade_cap = mint_trade_cap(balance_manager, ctx);
+    let trade_proof = balance_manager::generate_proof_as_trader(balance_manager, &trade_cap, ctx);
     let self = self.load_inner_mut();
     let mut order = self.book.cancel_order(order_id);
-    assert!(order.balance_manager_id() == balance_manager.id(), EInvalidOrderBalanceManager);
+    assert!(order.balance_manager_id() == balance_manager.id(), E_INVALID_ORDER_BALANCE_MANAGER);
     let (settled, owed) = self
         .state
         .process_cancel(&mut order, balance_manager.id(), self.pool_id, ctx);
-    self.vault.settle_balance_manager(settled, owed, balance_manager, trade_proof);
-
+    self.vault.settle_balance_manager(settled, owed, balance_manager, &trade_proof);
     order.emit_order_canceled(
         self.pool_id,
         ctx.sender(),
         clock.timestamp_ms(),
     );
+    transfer::public_transfer(trade_cap, tx_context::sender(ctx)); // Consume TradeCap
 }
 
 /// Cancel multiple orders within a vector. The orders must be owned by the
@@ -409,13 +411,13 @@ public fun cancel_orders<BaseAsset, QuoteAsset>(
     trade_proof: &TradeProof,
     order_ids: vector<u128>,
     clock: &Clock,
-    ctx: &TxContext,
+    ctx: &mut TxContext,
 ) {
     let mut i = 0;
     let num_orders = order_ids.length();
     while (i < num_orders) {
         let order_id = order_ids[i];
-        self.cancel_order(balance_manager, trade_proof, order_id, clock, ctx);
+        self.cancel_order(balance_manager, order_id, clock, ctx);
         i = i + 1;
     }
 }
@@ -424,9 +426,8 @@ public fun cancel_orders<BaseAsset, QuoteAsset>(
 public fun cancel_all_orders<BaseAsset, QuoteAsset>(
     self: &mut Pool<BaseAsset, QuoteAsset>,
     balance_manager: &mut BalanceManager,
-    trade_proof: &TradeProof,
     clock: &Clock,
-    ctx: &TxContext,
+    ctx: &mut TxContext,
 ) {
     let inner = self.load_inner_mut();
     let mut open_orders = vector[];
@@ -438,7 +439,7 @@ public fun cancel_all_orders<BaseAsset, QuoteAsset>(
     let num_orders = open_orders.length();
     while (i < num_orders) {
         let order_id = open_orders[i];
-        self.cancel_order(balance_manager, trade_proof, order_id, clock, ctx);
+        self.cancel_order(balance_manager, order_id, clock, ctx);
         i = i + 1;
     }
 }
