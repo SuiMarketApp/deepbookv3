@@ -6,7 +6,7 @@ module deepbook::pool;
 
 use deepbook::{
     account::Account,
-    balance_manager::{Self, BalanceManager, TradeProof, mint_trade_cap, generate_proof_as_trader},
+    balance_manager::{Self, BalanceManager, TradeProof, mint_trade_cap},
     big_vector::BigVector,
     book::{Self, Book},
     constants,
@@ -46,7 +46,6 @@ const EPoolNotRegistered: u64 = 14;
 const EPoolCannotBeBothWhitelistedAndStable: u64 = 15;
 const EMarketInactive: u64 = 17;
 const EInvalidFeeCollector: u64 = 18;
-const EUnauthorizedRouter: u64 = 19;
 const E_INVALID_ORDER_BALANCE_MANAGER: u64 = 20;
 
 // === Structs ===
@@ -63,7 +62,6 @@ public struct PoolInner<phantom BaseAsset, phantom QuoteAsset> has store {
     vault: Vault<BaseAsset, QuoteAsset>,
     deep_price: DeepPrice,
     registered_pool: bool,
-    authorized_routers: VecSet<ID>,
 }
 
 public struct PoolCreated<phantom BaseAsset, phantom QuoteAsset> has copy, drop, store {
@@ -88,17 +86,6 @@ public struct BookParamsUpdated<phantom BaseAsset, phantom QuoteAsset> has copy,
 public struct DeepBurned<phantom BaseAsset, phantom QuoteAsset> has copy, drop, store {
     pool_id: ID,
     deep_burned: u64,
-}
-
-/// Event emitted when a router's authorization status changes
-public struct RouterAuthorizationChanged<
-    phantom BaseAsset,
-    phantom QuoteAsset,
-> has copy, drop, store {
-    pool_id: ID,
-    router_id: ID,
-    is_authorized: bool,
-    timestamp: u64,
 }
 
 // === Public-Mutative Functions * POOL CREATION * ===
@@ -147,11 +134,9 @@ public fun place_limit_order<BaseAsset, QuoteAsset>(
     expire_timestamp: u64,
     clock: &Clock,
     ctx: &mut TxContext,
-): (OrderInfo, balance_manager::TradeCap) {
-    let trade_cap = mint_trade_cap(balance_manager, ctx);
-    let trade_proof = balance_manager::generate_proof_as_trader(balance_manager, &trade_cap, ctx);
-
-    let order_info = self.place_order_int(
+): OrderInfo {
+    let trade_proof = balance_manager.generate_proof_of_itself();
+    self.place_order_int(
         balance_manager,
         &trade_proof,
         client_order_id,
@@ -165,8 +150,7 @@ public fun place_limit_order<BaseAsset, QuoteAsset>(
         clock,
         false,
         ctx,
-    );
-    (order_info, trade_cap)
+    )
 }
 
 /// Place a market order. Quantity is in base asset terms. Calls
@@ -176,7 +160,6 @@ public fun place_limit_order<BaseAsset, QuoteAsset>(
 public fun place_market_order<BaseAsset, QuoteAsset>(
     self: &mut Pool<BaseAsset, QuoteAsset>,
     balance_manager: &mut BalanceManager,
-    trade_proof: &TradeProof,
     client_order_id: u64,
     self_matching_option: u8,
     quantity: u64,
@@ -185,9 +168,10 @@ public fun place_market_order<BaseAsset, QuoteAsset>(
     clock: &Clock,
     ctx: &TxContext,
 ): OrderInfo {
+    let trade_proof = balance_manager.generate_proof_of_itself();
     self.place_order_int(
         balance_manager,
-        trade_proof,
+        &trade_proof,
         client_order_id,
         constants::immediate_or_cancel(),
         self_matching_option,
@@ -299,7 +283,6 @@ public fun swap_exact_quantity<BaseAsset, QuoteAsset>(
 
     self.place_market_order(
         &mut temp_balance_manager,
-        &trade_proof,
         0,
         constants::self_matching_allowed(),
         base_quantity,
@@ -337,8 +320,7 @@ public fun modify_order<BaseAsset, QuoteAsset>(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
-    let trade_cap = mint_trade_cap(balance_manager, ctx);
-    let trade_proof = balance_manager::generate_proof_as_trader(balance_manager, &trade_cap, ctx);
+    let trade_proof = balance_manager.generate_proof_of_itself();
     let previous_quantity = self.get_order(order_id).quantity();
     let self = self.load_inner_mut();
     let (cancel_quantity, order) = self
@@ -361,13 +343,6 @@ public fun modify_order<BaseAsset, QuoteAsset>(
         ctx.sender(),
         clock.timestamp_ms(),
     );
-    transfer::public_transfer(trade_cap, tx_context::sender(ctx)); // Use public_transfer
-    order.emit_order_modified(
-        self.pool_id,
-        previous_quantity,
-        ctx.sender(),
-        clock.timestamp_ms(),
-    );
 }
 
 
@@ -383,8 +358,7 @@ public fun cancel_order<BaseAsset, QuoteAsset>(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
-    let trade_cap = mint_trade_cap(balance_manager, ctx);
-    let trade_proof = balance_manager::generate_proof_as_trader(balance_manager, &trade_cap, ctx);
+    let trade_proof = balance_manager.generate_proof_of_itself();
     let self = self.load_inner_mut();
     let mut order = self.book.cancel_order(order_id);
     assert!(order.balance_manager_id() == balance_manager.id(), E_INVALID_ORDER_BALANCE_MANAGER);
@@ -394,10 +368,9 @@ public fun cancel_order<BaseAsset, QuoteAsset>(
     self.vault.settle_balance_manager(settled, owed, balance_manager, &trade_proof);
     order.emit_order_canceled(
         self.pool_id,
-        ctx.sender(),
+        balance_manager.owner(),
         clock.timestamp_ms(),
     );
-    transfer::public_transfer(trade_cap, tx_context::sender(ctx)); // Consume TradeCap
 }
 
 /// Cancel multiple orders within a vector. The orders must be owned by the
@@ -408,7 +381,6 @@ public fun cancel_order<BaseAsset, QuoteAsset>(
 public fun cancel_orders<BaseAsset, QuoteAsset>(
     self: &mut Pool<BaseAsset, QuoteAsset>,
     balance_manager: &mut BalanceManager,
-    trade_proof: &TradeProof,
     order_ids: vector<u128>,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -691,34 +663,6 @@ public fun burn_deep<BaseAsset, QuoteAsset>(
     amount_burned
 }
 
-// === Public-Mutative Functions * ADMIN * ===
-/// Create a new pool. The pool is registered in the registry.
-/// Checks are performed to ensure the tick size, lot size, and min size are
-/// valid.
-/// Returns the id of the pool created
-// public fun create_pool_admin<BaseAsset, QuoteAsset>(
-//     registry: &mut Registry,
-//     tick_size: u64,
-//     lot_size: u64,
-//     min_size: u64,
-//     whitelisted_pool: bool,
-//     stable_pool: bool,
-//     _cap: &DeepbookAdminCap,
-//     ctx: &mut TxContext,
-// ): ID {
-//     let creation_fee = coin::zero(ctx);
-//     create_pool<BaseAsset, QuoteAsset>(
-//         registry,
-//         tick_size,
-//         lot_size,
-//         min_size,
-//         creation_fee,
-//         whitelisted_pool,
-//         stable_pool,
-//         ctx,
-//     )
-// }
-
 /// Unregister a pool in case it needs to be redeployed.
 public fun unregister_pool_admin<BaseAsset, QuoteAsset>(
     self: &mut Pool<BaseAsset, QuoteAsset>,
@@ -792,54 +736,6 @@ public fun adjust_min_lot_size_admin<BaseAsset, QuoteAsset>(
         min_size: self.book.min_size(),
         timestamp: clock.timestamp_ms(),
     });
-}
-
-/// Add a router to the authorized routers list
-public fun add_authorized_router<BaseAsset, QuoteAsset>(
-    self: &mut Pool<BaseAsset, QuoteAsset>,
-    router_id: ID,
-    _cap: &DeepbookAdminCap,
-    clock: &Clock,
-    ctx: &TxContext,
-) {
-    let self = self.load_inner_mut();
-    self.authorized_routers.insert(router_id);
-
-    event::emit(RouterAuthorizationChanged<BaseAsset, QuoteAsset> {
-        pool_id: self.pool_id,
-        router_id,
-        is_authorized: true,
-        timestamp: clock.timestamp_ms(),
-    });
-}
-
-/// Remove a router from the authorized routers list
-public fun remove_authorized_router<BaseAsset, QuoteAsset>(
-    self: &mut Pool<BaseAsset, QuoteAsset>,
-    router_id: ID,
-    _cap: &DeepbookAdminCap,
-    clock: &Clock,
-    ctx: &TxContext,
-) {
-    let self = self.load_inner_mut();
-    if (self.authorized_routers.contains(&router_id)) {
-        self.authorized_routers.remove(&router_id);
-
-        event::emit(RouterAuthorizationChanged<BaseAsset, QuoteAsset> {
-            pool_id: self.pool_id,
-            router_id,
-            is_authorized: false,
-            timestamp: clock.timestamp_ms(),
-        });
-    }
-}
-
-/// Check if a router is authorized
-public fun is_router_authorized<BaseAsset, QuoteAsset>(
-    self: &Pool<BaseAsset, QuoteAsset>,
-    router_id: ID,
-): bool {
-    self.load_inner().authorized_routers.contains(&router_id)
 }
 
 // === Public-View Functions ===
@@ -1225,8 +1121,7 @@ public(package) fun create_pool<BaseAsset, QuoteAsset>(
         state: state::empty(stable_pool, ctx),
         vault: vault::empty(),
         deep_price: deep_price::empty(),
-        registered_pool: true,
-        authorized_routers: vec_set::empty(),
+        registered_pool: true
     };
     if (whitelisted_pool) {
         pool_inner.set_whitelist(ctx);
@@ -1328,7 +1223,7 @@ fun place_order_int<BaseAsset, QuoteAsset>(
         self.pool_id,
         balance_manager.id(),
         client_order_id,
-        ctx.sender(),
+        balance_manager.owner(),
         order_type,
         self_matching_option,
         price,
@@ -1431,97 +1326,3 @@ public(package) fun assert_market_active<BaseAsset, QuoteAsset>(
 ) {
     assert!(self.load_inner().state.governance().trade_params().is_active(), EMarketInactive);
 }
-
-/// Place a shadow limit order from the router contract alongside a user's order.
-/// This function can only be called by authorized router contracts.
-/// The router must have a balance manager with sufficient funds.
-public fun place_shadow_limit_order<BaseAsset, QuoteAsset>(
-    self: &mut Pool<BaseAsset, QuoteAsset>,
-    router_balance_manager: &mut BalanceManager,
-    trade_proof: &TradeProof,
-    client_order_id: u64,
-    order_type: u8,
-    self_matching_option: u8,
-    price: u64,
-    quantity: u64,
-    is_bid: bool,
-    expire_timestamp: u64,
-    authorized_router_id: ID,
-    clock: &Clock,
-    ctx: &TxContext,
-): OrderInfo {
-    // Verify the router is authorized
-    assert!(router_balance_manager.id() == authorized_router_id, EUnauthorizedRouter);
-    assert!(self.is_router_authorized(authorized_router_id), EUnauthorizedRouter);
-
-    // Place the shadow order using the same internal function as regular limit orders
-    self.place_order_int(
-        router_balance_manager,
-        trade_proof,
-        client_order_id,
-        order_type,
-        self_matching_option,
-        price,
-        quantity,
-        is_bid,
-        false,
-        expire_timestamp,
-        clock,
-        false,
-        ctx,
-    )
-}
-
-/// Place a user limit order with a shadow order from the router.
-/// This allows placing both orders in a single transaction.
-// public fun place_limit_order_with_shadow<BaseAsset, QuoteAsset>(
-//     self: &mut Pool<BaseAsset, QuoteAsset>,
-//     user_balance_manager: &mut BalanceManager,
-//     user_trade_proof: &TradeProof,
-//     router_balance_manager: &mut BalanceManager,
-//     router_trade_proof: &TradeProof,
-//     client_order_id: u64,
-//     order_type: u8,
-//     self_matching_option: u8,
-//     price: u64,
-//     quantity: u64,
-//     is_bid: bool,
-//     expire_timestamp: u64,
-//     authorized_router_id: ID,
-//     clock: &Clock,
-//     ctx: &TxContext,
-// ): (OrderInfo, OrderInfo) {
-//     // Place the user's order first
-//     let user_order = self.place_limit_order(
-//         user_balance_manager,
-//         user_trade_proof,
-//         client_order_id,
-//         order_type,
-//         self_matching_option,
-//         price,
-//         quantity,
-//         is_bid,
-//         false,
-//         expire_timestamp,
-//         clock,
-//         ctx,
-//     );
-
-//     // Place the shadow order
-//     let shadow_order = self.place_shadow_limit_order(
-//         router_balance_manager,
-//         router_trade_proof,
-//         client_order_id + 1, // Increment order ID for shadow order
-//         order_type,
-//         self_matching_option,
-//         price,
-//         quantity,
-//         is_bid,
-//         expire_timestamp,
-//         authorized_router_id,
-//         clock,
-//         ctx,
-//     );
-
-//     (user_order, shadow_order)
-// }

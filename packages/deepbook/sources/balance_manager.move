@@ -203,6 +203,15 @@ public fun generate_proof_as_trader(
     }
 }
 
+public(package) fun generate_proof_of_itself(
+    self: &mut BalanceManager,
+) : TradeProof {
+    TradeProof {
+        balance_manager_id: object::id(self),
+        trader: self.owner,
+    }
+}
+
 /// Deposit funds to a balance manager. Only owner can call this directly.
 public fun deposit<T>(balance_manager: &mut BalanceManager, coin: Coin<T>, ctx: &mut TxContext) {
     balance_manager.emit_balance_event(
