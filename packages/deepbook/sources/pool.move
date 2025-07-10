@@ -424,7 +424,7 @@ public fun withdraw_settled_amounts<BaseAsset, QuoteAsset>(
     let self = self.load_inner_mut();
     let (settled, owed) = self.state.withdraw_settled_amounts(balance_manager.id());
     let trade_proof = balance_manager.generate_proof_of_itself();
-    self.vault.settle_balance_manager(settled, owed, balance_manager, trade_proof);
+    self.vault.settle_balance_manager(settled, owed, balance_manager, &trade_proof);
 }
 
 // === Public-Mutative Functions * GOVERNANCE * ===
